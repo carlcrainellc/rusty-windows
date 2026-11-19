@@ -44,8 +44,6 @@ sc.exe start RustySessionRouter
 known clients, give its operator your address from `my-client-address.txt`; never share
 `client.key`.
 
-To run your own exit, see [docs/run-your-own-exit.md](docs/run-your-own-exit.md).
-
 ## Known issues
 
 - Other VPNs (NordVPN and the like) fight over the default route. Turn them off first;
@@ -74,6 +72,18 @@ the router with MinGW on Debian, the Rust parts on Windows, and the installer.
 GPL-3.0-or-later, see [LICENSE](LICENSE). Third-party code under `router/external/` and
 `router/cmake/session-deps` keeps its own licenses. `wintun.dll` is downloaded from
 wintun.net at build time and ships with its own license.
+
+## Run your own exit
+
+Use the exit seller kit from [SeshSwap](https://github.com/carlcrainellc/seshswap) (`seller-kit/exit-seller.sh`, see `docs/EXITS.md` there). It sets up the exit, firewall and DNS in one command and prints the exit's `.sesh` address.
+
+To let someone in without payment, add their client address:
+
+```
+sudo exit-seller.sh allow <their-address>.sesh
+```
+
+They find it in `my-client-address.txt` on Windows. `disallow` removes it and `allowed` lists them.
 
 ## Uninstall
 
