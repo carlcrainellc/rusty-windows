@@ -1,0 +1,7 @@
+{
+  "router_exe": "session-router.exe",
+  "router_args": ["session-router.ini"],
+  "set_dns": "127.0.0.1",
+  "rpc": "127.0.0.1:1190",
+  "stop_timeout_secs": 15
+}

@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Public PGP key fingerprint in vendored Catch2"
+paths = ['''router/external/oxen-mq/tests/Catch2/MAINTAINERS\.md''']

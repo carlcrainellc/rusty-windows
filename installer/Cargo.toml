@@ -1,0 +1,21 @@
+[package]
+name = "rusty-setup"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "GPL-3.0-or-later"
+description = "One-file installer for Rusty and Session Router (Windows)."
+
+# Not part of the main workspace: it embeds binaries that only exist at release time.
+[workspace]
+
+[dependencies]
+ed25519-dalek = "2"
+getrandom = "0.2"
+
+[build-dependencies]
+embed-manifest = "1.4"
+
+[profile.release]
+opt-level = "s"
+strip = true

@@ -1,0 +1,139 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WINTUN_URL: https://www.wintun.net/builds/wintun-0.14.1.zip
+  WINTUN_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
+
+jobs:
+  rust-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo check --workspace --all-targets --target x86_64-pc-windows-gnu
+
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --release
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Real route table and DNS (reads, plus one throwaway host route)
+        run: cargo test -p rusty-net --test windows_live -- --nocapture --test-threads=1
+        env:
+          RUSTY_LIVE_WRITE: "1"
+      - name: No Visual C++ runtime needed
+        shell: pwsh
+        run: |
+          foreach ($f in 'target\release\rusty-service.exe', 'target\release\rusty-ctl.exe') {
+            $t = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($f))
+            if ($t -match '(?i)vcruntime140\.dll|api-ms-win-crt-') { throw "$f needs the VC++ runtime" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rusty-exes
+          path: |
+            target/release/rusty-service.exe
+            target/release/rusty-ctl.exe
+
+  router:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 150
+    steps:
+      - name: Packages
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential cmake git pkg-config \
+            ca-certificates curl python3 automake autoconf libtool file zip nsis \
+            librsvg2-bin icoutils mingw-w64 g++-mingw-w64-x86-64-posix gcc-mingw-w64-x86-64-posix
+          update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+          update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          git config --global --add safe.directory '*'
+          mkdir -p router/build/win32
+          ./router/contrib/windows-configure.sh "$PWD/router" "$PWD/router/build/win32" \
+            -DSROUTER_GUI=OFF -DSUBMODULE_CHECK=OFF
+      - name: Build
+        run: make -j"$(nproc)" -C router/build/win32 session-router
+      - name: Check the exe
+        run: |
+          exe=router/build/win32/daemon/session-router.exe
+          [ -f "$exe" ] || exe=$(find router/build/win32 -name session-router.exe | head -1)
+          file "$exe"
+          x86_64-w64-mingw32-objdump -p "$exe" | grep 'DLL Name' | sort -u
+          mkdir -p out && cp "$exe" out/session-router.exe
+          sha256sum out/session-router.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: session-router-exe
+          path: out/session-router.exe
+
+  installer:
+    needs: [rust-windows, router]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: MinGW linker
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64
+      - uses: actions/download-artifact@v4
+        with:
+          name: rusty-exes
+          path: package
+      - uses: actions/download-artifact@v4
+        with:
+          name: session-router-exe
+          path: package
+      - name: Assemble
+        run: |
+          curl -fsSL -o /tmp/wintun.zip "$WINTUN_URL"
+          echo "$WINTUN_SHA256  /tmp/wintun.zip" | sha256sum -c
+          unzip -p /tmp/wintun.zip wintun/bin/amd64/wintun.dll > package/wintun.dll
+          unzip -p /tmp/wintun.zip wintun/LICENSE.txt > package/wintun-LICENSE.txt
+          cp installer/files/* package/
+          cp router/contrib/bootstrap/mainnet.signed package/bootstrap.signed
+          cp LICENSE package/LICENSE
+          ls -l package
+      - name: Build rusty-setup.exe
+        working-directory: installer
+        run: |
+          PACKAGE_DIR="$GITHUB_WORKSPACE/package" RUSTY_VERSION="${GITHUB_SHA::7}" \
+            cargo build --release --target x86_64-pc-windows-gnu
+          mkdir -p ../dist
+          cp target/x86_64-pc-windows-gnu/release/rusty-setup.exe ../dist/
+          cp ../installer/files/README.txt ../dist/
+          cd ../dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rusty-setup
+          path: dist/

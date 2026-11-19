@@ -1,0 +1,19 @@
+[package]
+name = "rusty-service"
+description = "Runs Session Router as a Windows service, restarts it on crash, and puts the network back on stop"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rusty-net.workspace = true
+rusty-rpc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ctrlc = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
+windows.workspace = true

@@ -1,0 +1,76 @@
+# Rusty for Windows
+
+Session Router with a small Rust service that help keeps your Windows network sane.
+`rusty-ctl map` sends your traffic through a Session Router exit; `unmap` or
+stopping the service puts everything back.
+
+Not an official Session Foundation project.
+
+Status: early test build, tested on Windows Server 2022 and Windows 11, including machines with several network adapters (Wi-Fi, Ethernet and other VPN adapters).
+
+## What's here
+
+| Path | What it is |
+| --- | --- |
+| `router/` | Session Router (C++), with Windows fixes. See [router/CHANGES.md](router/CHANGES.md). |
+| `crates/rusty-service` | Runs the router as a Windows service, restarts it if it crashes, and restores routes, DNS and IPv6 whenever it stops. |
+| `crates/rusty-net` | Routes and DNS through the IP Helper API, with a journal so a crash can be undone. |
+| `crates/rusty-ctl` | Command line: status, exits, map, unmap, swap, and stop (stops the service). |
+| `crates/rusty-rpc` | Client for the router's local RPC (OxenMQ over ZMTP). |
+| `installer/` | `rusty-setup.exe`: one file that unpacks everything, makes a client key and installs the service. |
+
+## Install
+
+Run `rusty-setup.exe` (from a release, or the `rusty-setup` artifact of a CI run) and
+accept the admin prompt. It installs to `C:\Rusty`, creates `client.key` on first run,
+and prints this PC's `.sesh` address. Running a newer setup later updates the files and
+keeps the key.
+
+## Use
+
+In an admin PowerShell:
+
+```
+cd C:\Rusty
+sc.exe start RustySessionRouter
+.\rusty-ctl.exe status
+.\rusty-ctl.exe map <exit>.sesh --full      # everything through the exit
+.\rusty-ctl.exe exits                       # wait for "session to exit: live"
+.\rusty-ctl.exe unmap <exit>.sesh
+.\rusty-ctl.exe stop                        # stops the service; network back as before
+```
+
+`--range 10.0.0.0/8` instead of `--full` sends only that range. If the exit only lets in
+known clients, give its operator your address from `my-client-address.txt`; never share
+`client.key`.
+
+To remove: `.\rusty-service.exe uninstall`, then delete `C:\Rusty`.
+
+## Known issues
+
+- Other VPNs (NordVPN and the like) fight over the default route. Turn them off first;
+  `rusty-ctl` warns when one is up.
+- While an exit is mapped, IPv6 is off on all adapters. It comes back on unmap, stop, or
+  after a crash.
+- If you map a full-tunnel exit and it isn't connected yet, websites won't load by name. Unmap it, or stop the service, and they work again.
+- Windows only, x64 only.
+
+## Build
+
+CI ([.github/workflows/windows.yml](.github/workflows/windows.yml)) builds everything:
+the router with MinGW on Debian, the Rust parts on Windows, and the installer.
+
+- Rust parts: `cargo build --release` (Rust 1.85+). Tests run on Linux too:
+  `cargo test`.
+- Router: on Debian trixie with `mingw-w64` (posix threads),
+  `router/contrib/windows-configure.sh router router/build/win32 -DSROUTER_GUI=OFF -DSUBMODULE_CHECK=OFF`
+  then `make -C router/build/win32 session-router`.
+- Installer: put the files listed in `installer/src/main.rs` in a folder, then
+  `PACKAGE_DIR=/that/folder cargo build --release --target x86_64-pc-windows-gnu` in
+  `installer/`.
+
+## License
+
+GPL-3.0-or-later, see [LICENSE](LICENSE). Third-party code under `router/external/` and
+`router/cmake/session-deps` keeps its own licenses. `wintun.dll` is downloaded from
+wintun.net at build time and ships with its own license.
