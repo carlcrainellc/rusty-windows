@@ -44,6 +44,8 @@ sc.exe start RustySessionRouter
 known clients, give its operator your address from `my-client-address.txt`; never share
 `client.key`.
 
+To run your own exit, see [docs/run-your-own-exit.md](docs/run-your-own-exit.md).
+
 ## Known issues
 
 - Other VPNs (NordVPN and the like) fight over the default route. Turn them off first;
