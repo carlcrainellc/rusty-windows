@@ -1,6 +1,6 @@
 # Rusty for Windows
 
-Session Router with a small Rust service that help keeps your Windows network sane.
+Session Router with a small Rust service that helps keep your Windows network sane.
 `rusty-ctl map` sends your traffic through a Session Router exit; `unmap` or
 stopping the service puts everything back.
 
