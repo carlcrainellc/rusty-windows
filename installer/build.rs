@@ -9,7 +9,8 @@ fn main() {
         )
         .expect("manifest");
     }
-    let dir = std::env::var("PACKAGE_DIR").expect("set PACKAGE_DIR to the folder with the files to package");
+    let dir = std::env::var("PACKAGE_DIR")
+        .expect("set PACKAGE_DIR to the folder with the files to package");
     println!("cargo:rustc-env=PACKAGE_DIR={dir}");
     // Shown on the first line so people can tell which build they ran.
     let release = std::env::var("RUSTY_VERSION").unwrap_or_else(|_| "(dev build)".into());

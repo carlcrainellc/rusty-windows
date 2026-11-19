@@ -44,8 +44,6 @@ sc.exe start RustySessionRouter
 known clients, give its operator your address from `my-client-address.txt`; never share
 `client.key`.
 
-To remove: `.\rusty-service.exe uninstall`, then delete `C:\Rusty`.
-
 ## Known issues
 
 - Other VPNs (NordVPN and the like) fight over the default route. Turn them off first;
@@ -74,3 +72,21 @@ the router with MinGW on Debian, the Rust parts on Windows, and the installer.
 GPL-3.0-or-later, see [LICENSE](LICENSE). Third-party code under `router/external/` and
 `router/cmake/session-deps` keeps its own licenses. `wintun.dll` is downloaded from
 wintun.net at build time and ships with its own license.
+
+## Uninstall
+
+In an admin PowerShell:
+
+```
+cd C:\Rusty
+.\rusty-ctl.exe stop
+.\rusty-service.exe uninstall
+cd \
+Remove-Item C:\Rusty -Recurse
+```
+
+`rusty-service.exe uninstall` removes both services, RustySessionRouter and
+RustyNetRestore. If the folder is already gone, remove them with
+`sc.exe delete RustySessionRouter` and `sc.exe delete RustyNetRestore`.
+
+Deleting the folder alone leaves both services registered.

@@ -21,8 +21,6 @@ from my-client-address.txt. Never share client.key.
 Update: run the new setup. It stops the service, replaces the program
 files and keeps client.key.
 
-Remove: .\rusty-service.exe uninstall, then delete C:\Rusty.
-
 Things to know
 --------------
 - Turn off other VPNs first. rusty-ctl warns if one has a default route.
@@ -36,3 +34,15 @@ Things to know
 
 Licenses: GPL-3.0-or-later (see LICENSE); wintun.dll is from wintun.net,
 see wintun-LICENSE.txt. Source: the repository this release came from.
+
+Uninstall (admin PowerShell)
+----------------------------
+   cd C:\Rusty
+   .\rusty-ctl.exe stop
+   .\rusty-service.exe uninstall      (removes both services)
+   cd \
+   Remove-Item C:\Rusty -Recurse
+
+If the folder is already gone: sc.exe delete RustySessionRouter and
+sc.exe delete RustyNetRestore. Deleting the folder alone leaves both
+services registered.

@@ -93,9 +93,12 @@ fn sc(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-/// Where the installed service's program lives and whether it is running, if installed.
-fn installed_service() -> Option<(PathBuf, bool)> {
-    let qc = sc(&["qc", "RustySessionRouter"])?;
+const SERVICE: &str = "RustySessionRouter";
+const RESTORE: &str = "RustyNetRestore";
+
+/// Where a service's program lives and whether it is running, if the service is registered.
+fn installed_service(name: &str) -> Option<(PathBuf, bool)> {
+    let qc = sc(&["qc", name])?;
     let line = qc.lines().find(|l| l.contains("BINARY_PATH_NAME"))?;
     let raw = line.split_once(':')?.1.trim();
     let exe = if let Some(rest) = raw.strip_prefix('"') {
@@ -103,27 +106,62 @@ fn installed_service() -> Option<(PathBuf, bool)> {
     } else {
         raw.split_whitespace().next()?.to_string()
     };
-    let running = sc(&["query", "RustySessionRouter"])
+    let running = sc(&["query", name])
         .map(|q| q.contains("RUNNING") || q.contains("PENDING"))
         .unwrap_or(false);
     Some((PathBuf::from(exe), running))
 }
 
-/// Stop the service and wait until Windows says it has stopped, so its files can be replaced.
-fn stop_service() -> Result<(), String> {
-    let _ = sc(&["stop", "RustySessionRouter"]);
+/// Stop a service and wait until Windows says it has stopped, so its files can be replaced.
+fn stop_service(name: &str) -> Result<(), String> {
+    let _ = sc(&["stop", name]);
     for _ in 0..60 {
-        let q = sc(&["query", "RustySessionRouter"]).unwrap_or_default();
-        if q.contains("STOPPED") {
+        let q = sc(&["query", name]).unwrap_or_default();
+        if q.contains("STOPPED") || q.is_empty() {
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    Err(
-        "RustySessionRouter didn't stop within 30 s. Run \"sc.exe stop RustySessionRouter\", \
-         wait a few seconds, and start this setup again."
-            .into(),
-    )
+    Err(format!(
+        "{name} didn't stop within 30 s. Run \"sc.exe stop {name}\", wait a few seconds, \
+         and start this setup again."
+    ))
+}
+
+/// Stop and remove a service registration.
+fn delete_service(name: &str) -> Result<(), String> {
+    stop_service(name)?;
+    if sc(&["delete", name]).is_none() {
+        return Err(format!(
+            "couldn't remove the old {name} service. Run \"sc.exe delete {name}\" and start \
+             this setup again."
+        ));
+    }
+    // The SCM finishes deleting once nothing holds the service open.
+    for _ in 0..20 {
+        if installed_service(name).is_none() {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    Err(format!(
+        "the old {name} service is marked for removal but still there. Restart Windows and \
+         start this setup again."
+    ))
+}
+
+/// A registration whose program is gone (its folder was deleted) can only be in the way.
+fn remove_if_stale(name: &str) -> Result<(), String> {
+    if let Some((exe, _)) = installed_service(name) {
+        if !exe.exists() {
+            println!(
+                "{name} is registered to {}, which no longer exists; removing it.",
+                exe.display()
+            );
+            delete_service(name)?;
+        }
+    }
+    Ok(())
 }
 
 fn same_dir(exe: &Path, dir: &Path) -> bool {
@@ -134,7 +172,9 @@ fn same_dir(exe: &Path, dir: &Path) -> bool {
 
 fn print_address(dir: &Path, sesh: &str) {
     println!();
-    println!("This PC's client address (an exit with an allow list needs it; never share client.key):");
+    println!(
+        "This PC's client address (an exit with an allow list needs it; never share client.key):"
+    );
     println!();
     println!("    {sesh}");
     println!();
@@ -152,45 +192,82 @@ fn run() -> Result<(), String> {
         Some(i) => PathBuf::from(args.get(i + 1).ok_or("--dir needs a folder")?),
         None => PathBuf::from(r"C:\Rusty"),
     };
-    std::fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
+    // Check what's already registered before touching the disk.
+    remove_if_stale(SERVICE)?;
+    remove_if_stale(RESTORE)?;
     let mut already = false;
     let mut was_running = false;
-    if let Some((exe, running)) = installed_service() {
+    if let Some((exe, running)) = installed_service(SERVICE) {
         if !same_dir(&exe, &dir) {
             return Err(format!(
-                "RustySessionRouter is already installed from {}. Remove it first with \
+                "{SERVICE} is already installed from {}. Remove it first with \
                  \"rusty-service.exe uninstall\" in that folder.",
                 exe.display()
             ));
         }
         if running {
-            println!(
-                "RustySessionRouter is running; stopping it to update (this unmaps the exit)."
-            );
-            stop_service()?;
+            println!("{SERVICE} is running; stopping it to update (this unmaps the exit).");
+            stop_service(SERVICE)?;
         }
-        println!("RustySessionRouter is already installed here; updating its files.");
+        println!("{SERVICE} is already installed here; updating its files.");
         was_running = running;
         already = true;
+    } else if let Some((exe, _)) = installed_service(RESTORE) {
+        // Left over from a half-removed install; "rusty-service install" creates both.
+        if !same_dir(&exe, &dir) {
+            return Err(format!(
+                "{RESTORE} is still installed from {}. Remove it first with \
+                 \"rusty-service.exe uninstall\" in that folder.",
+                exe.display()
+            ));
+        }
+        delete_service(RESTORE)?;
     }
+    // On a fresh install, remember what we add so a failed install can take it back out.
+    let made_dir = !dir.exists();
+    let mut added: Vec<PathBuf> = ["client.key", "my-client-address.txt"]
+        .iter()
+        .chain(FILES.iter().map(|(n, _)| n))
+        .map(|n| dir.join(n))
+        .filter(|p| !p.exists())
+        .collect();
+    if already {
+        added.clear();
+    }
+    let rollback = |why: String| -> String {
+        for p in &added {
+            let _ = std::fs::remove_file(p);
+        }
+        if made_dir {
+            let _ = std::fs::remove_dir(&dir);
+        }
+        if added.is_empty() {
+            why
+        } else {
+            format!("{why}\nRemoved the files this setup had unpacked.")
+        }
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
     for (name, data) in FILES {
         std::fs::write(dir.join(name), data).map_err(|e| {
-            format!(
+            rollback(format!(
                 "can't write {name}: {e}. Close anything using {} and start this setup again.",
                 dir.display()
-            )
+            ))
         })?;
     }
     println!("Unpacked {} files to {}", FILES.len(), dir.display());
 
-    let sesh = ensure_key(&dir).map_err(|e| format!("client key: {e}"))?;
+    let sesh = ensure_key(&dir).map_err(|e| rollback(format!("client key: {e}")))?;
     std::fs::write(dir.join("my-client-address.txt"), format!("{sesh}\r\n"))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| rollback(e.to_string()))?;
 
     if already {
         println!("Updated. Kept the existing client.key and service.");
         if was_running {
-            println!("The service was stopped for the update; start it with: sc.exe start RustySessionRouter");
+            println!(
+                "The service was stopped for the update; start it with: sc.exe start {SERVICE}"
+            );
         }
         print_address(&dir, &sesh);
         return Ok(());
@@ -200,14 +277,14 @@ fn run() -> Result<(), String> {
         .arg("install")
         .current_dir(&dir)
         .output()
-        .map_err(|e| format!("couldn't run rusty-service.exe: {e}"))?;
+        .map_err(|e| rollback(format!("couldn't run rusty-service.exe: {e}")))?;
     print!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     if !out.status.success() {
-        return Err("rusty-service.exe install failed".into());
+        return Err(rollback("rusty-service.exe install failed".into()));
     }
 
     print_address(&dir, &sesh);

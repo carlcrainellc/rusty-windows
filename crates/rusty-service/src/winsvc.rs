@@ -59,7 +59,7 @@ pub fn install(config: &Path) -> Result<(), String> {
         account_password: None,
     };
     mgr.create_service(&info, ServiceAccess::QUERY_STATUS)
-        .map_err(|e| format!("can't create the service: {e}"))?;
+        .map_err(|e| create_error(NAME, e))?;
     let restore = ServiceInfo {
         name: OsString::from(RESTORE_NAME),
         display_name: OsString::from(RESTORE_DISPLAY),
@@ -80,11 +80,36 @@ pub fn install(config: &Path) -> Result<(), String> {
         account_name: None,
         account_password: None,
     };
-    mgr.create_service(&restore, ServiceAccess::QUERY_STATUS)
-        .map_err(|e| format!("can't create {RESTORE_NAME}: {e}"))?;
+    if let Err(e) = mgr.create_service(&restore, ServiceAccess::QUERY_STATUS) {
+        // Don't leave half an install behind.
+        let _ = remove(&mgr, NAME, false);
+        return Err(create_error(RESTORE_NAME, e));
+    }
     println!("installed {NAME} (manual start). Start it with: sc start {NAME}");
     println!("installed {RESTORE_NAME} (runs at boot, puts the network back if needed)");
     Ok(())
+}
+
+/// Say why a service couldn't be created in words, not "IO error in winapi call".
+fn create_error(name: &str, e: windows_service::Error) -> String {
+    let windows_service::Error::Winapi(io) = &e else {
+        return format!("can't create {name}: {e}");
+    };
+    match io.raw_os_error() {
+        // ERROR_SERVICE_EXISTS
+        Some(1073) => format!(
+            "can't create {name}: a service with that name already exists, probably from an \
+             older install. Remove it with \"sc.exe delete {name}\" and try again."
+        ),
+        // ERROR_SERVICE_MARKED_FOR_DELETE
+        Some(1072) => format!(
+            "can't create {name}: the old one is still being removed. Close the Services \
+             window (or restart Windows) and try again."
+        ),
+        // ERROR_ACCESS_DENIED
+        Some(5) => format!("can't create {name}: access denied (run as administrator)"),
+        _ => format!("can't create {name}: {io}"),
+    }
 }
 
 pub fn uninstall() -> Result<(), String> {
