@@ -482,6 +482,21 @@ namespace srouter::handlers
         // else: on_connected puts it up once the edge connects.
     }
 
+    std::pair<bool, std::string_view> TunEndpoint::exit_route_status() const
+    {
+        if (not _net_if)
+            return {false, "no vpn interface"};
+        if (not _route_poker or not _route_poker->enabled())
+            return {false, "auto-routing is off"};
+        if (_route_poker->is_up() or not _routed_exit_ranges.empty())
+            return {true, {}};
+        if (_router.config().exit.ranges.empty())
+            return {false, "no exit mapped"};
+        if (not _router.is_edge_connected())
+            return {false, "not connected to the network yet"};
+        return {false, "waiting to put routes up"};
+    }
+
     void TunEndpoint::add_default_route()
     {
         if (not _net_if)
@@ -594,7 +609,7 @@ namespace srouter::handlers
         }
         else
         {
-            // No direct .sesh mapping for dest — try reserved-range exit broker (clear exit tip).
+            // No direct .sesh mapping for dest — try reserved-range exit broker (clear exit).
             std::optional<NetworkAddress> exit_remote;
             if (is_v4)
                 exit_remote = exit_for_ip(dest4);
@@ -614,7 +629,7 @@ namespace srouter::handlers
                     if (not session)
                         return false;
                     // Do NOT force set_exit_capable(true) here — that lied to ListExits before
-                    // CC/aligned path existed (DIG3). Real flag comes from update_intros/ExitPolicy.
+                    // CC/aligned path existed. Real flag comes from update_intros/ExitPolicy.
                     session->send_session_data_message(pkt.span(), pkt.protocol());
                     return true;
                 };
@@ -682,8 +697,8 @@ namespace srouter::handlers
         send_packet_to_net_if(std::move(pkt));
     }
 
-    // to_exit: this tip is a clear exit and inbound overlay packets should be forwarded to clearnet.
-    // from_exit: this tip is an exit *client* receiving return traffic from a mapped exit broker.
+    // to_exit: this router is a clear exit and inbound overlay packets should be forwarded to clearnet.
+    // from_exit: this router is an exit *client* receiving return traffic from a mapped exit broker.
     void TunEndpoint::handle_inbound_packet(IPPacket pkt, traffic_type type, NetworkAddress remote)
     {
         (void)type;

@@ -78,7 +78,7 @@ namespace srouter::rpc
             "ip_ranges",
             swapexits.request.ip_ranges,
             "token",
-            swapexits.request.token);  // mapexit lab10 tip surface
+            swapexits.request.token);
     }
 
 #if 0

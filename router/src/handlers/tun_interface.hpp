@@ -37,7 +37,7 @@ namespace srouter::handlers
         virtual std::pair<std::optional<NetworkAddress>, bool> reverse_lookup(const ipv4& ip) = 0;
         virtual std::pair<std::optional<NetworkAddress>, bool> reverse_lookup(const ipv6& ip) = 0;
 
-        // Exit-client tip: install / remove OS default route via this TUN (route poker).
+        // Exit client: install / remove OS default route via this TUN (route poker).
         // No-op default so embedded/core builds stay free of vpn types.
         virtual void add_default_route() {}
         virtual void delete_default_route() {}
@@ -46,7 +46,10 @@ namespace srouter::handlers
         // route poker up when the first mapping appears and down when the last one goes.
         virtual void exit_mappings_changed() {}
 
-        // True when this tip is operating as a clear exit (config [exit] enable=true).
+        // Whether traffic for mapped exits is routed into the TUN right now, and if not, why.
+        virtual std::pair<bool, std::string_view> exit_route_status() const { return {false, "no vpn interface"}; }
+
+        // True when this router is operating as a clear exit (config [exit] enable=true).
         virtual bool is_exit_node() const { return false; }
     };
 

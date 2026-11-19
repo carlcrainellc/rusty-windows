@@ -269,8 +269,8 @@ namespace srouter
 
         const Config& config() const { return _config; }
 
-        // Runtime MapExit / unmap_exit mutate reserved-range mappings (exit client tip).
-        auto& mutable_exit_ranges() { return _config.exit.ranges; }  // mapexit lab10 tip surface (ship bootstrap-mapexit)
+        // Runtime MapExit / unmap_exit mutate reserved-range mappings (exit client).
+        auto& mutable_exit_ranges() { return _config.exit.ranges; }
         const auto& exit_ranges() const { return _config.exit.ranges; }
 
         ContactDB& contact_db()

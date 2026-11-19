@@ -257,7 +257,7 @@ namespace srouter
 
             // Set when the remote ClientContact advertises an exit policy ("e"), or when local
             // config maps this peer as an exit via reserved-range / MapExit.
-            bool is_exit_capable{false};  // mapexit lab10 tip surface (ship bootstrap-mapexit)
+            bool is_exit_capable{false};
             void set_exit_capable(bool v);
 
             // Cheap activity stamp for ListExits (unix ms).

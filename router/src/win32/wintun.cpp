@@ -172,8 +172,8 @@ namespace srouter::win32
                         Sleep(50);
                     }
                     // Soft-fail: RoutePoker add_default may Disable-NetAdapterBinding ms_tcpip6
-                    // globally; a fresh Wintun adapter then cannot take an IPv6 unicast. IPv4-only
-                    // tip must still come up for exit-client Stage-A (DIG3 nest recovery).
+                    // globally; a fresh Wintun adapter then cannot take an IPv6 unicast. The adapter
+                    // must still come up IPv4-only for an exit client.
                     log::warning(
                         logcat,
                         "cannot set IPv6 address '{}' (winerr={}); continuing IPv4-only",

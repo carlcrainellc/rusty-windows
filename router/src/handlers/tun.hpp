@@ -167,6 +167,7 @@ namespace srouter::handlers
         void add_default_route() override;
         void delete_default_route() override;
         void exit_mappings_changed() override;
+        std::pair<bool, std::string_view> exit_route_status() const override;
 
         // Look up which configured exit .sesh should carry traffic to dest IP (reserved-range).
         bool is_dns_upstream(const ipv4& dest) const;

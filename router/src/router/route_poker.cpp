@@ -225,7 +225,7 @@ void RoutePoker::update()
             route.add_blackhole();
 
         // First-hop / local route pokes need a discovered non-TUN gateway.  If discovery is
-        // unavailable yet, still install the default route via TUN (exit client tip).
+        // unavailable yet, still install the default route via TUN (exit client).
         // IMPORTANT: flush *all* first-hop /32s (pre-up recorded + established + pending
         // outbound) *before* default-via-TUN, or edge QUIC is blackholed into the TUN and
         // path builds to the exit time out.
@@ -252,7 +252,7 @@ void RoutePoker::update()
                     poke_remote(conn.conn->remote());
                 });
 
-            // 3) In-flight dials not yet in client_conns (DIG3: pending_outbound).
+            // 3) In-flight dials not yet in client_conns (pending_outbound).
             _router.link_manager().endpoint.for_each_pending_outbound(
                 [&poke_remote](const RouterID&, link::Connection& conn) {
                     if (conn.conn)

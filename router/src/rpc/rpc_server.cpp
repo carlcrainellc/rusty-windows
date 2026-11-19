@@ -537,11 +537,28 @@ namespace srouter::rpc
         }
     }  // namespace
 
+    namespace
+    {
+        // Must run on the router's job queue.
+        nlohmann::json route_status_json(Router& router)
+        {
+            bool up = false;
+            std::string_view reason{"no vpn interface"};
+            if (const auto& tun = router.tun_endpoint())
+                std::tie(up, reason) = tun->exit_route_status();
+            nlohmann::json j;
+            j["routes_up"] = up;
+            if (not up and not reason.empty())
+                j["routes_reason"] = reason;
+            return j;
+        }
+    }  // namespace
+
     void RPCServer::invoke(MapExit& mapexit)
     {
         log_print_rpc(mapexit);
 
-        // Controlled clear-exit mapping (privacy profile: IP ranges only — no hostname resolve).  // mapexit lab10 tip surface (ship bootstrap-mapexit)
+        // Controlled clear-exit mapping (privacy profile: IP ranges only — no hostname resolve).
         try
         {
             if (mapexit.request.address.empty())
@@ -616,13 +633,14 @@ namespace srouter::rpc
                 mapexit.request.address,
                 slot.size());
 
-            _router._jq->call([this] {
+            auto status = _router._jq->call_get([this] {
                 if (auto& tun = _router.tun_endpoint())
                     tun->exit_mappings_changed();
+                return route_status_json(_router);
             });
 
-            SetJSONResponse(
-                "mapped {} range(s) via {}"_format(slot.size(), mapexit.request.address), mapexit.response);
+            status["message"] = "mapped {} range(s) via {}"_format(slot.size(), mapexit.request.address);
+            SetJSONResponse(status, mapexit.response);
         }
         catch (const std::exception& e)
         {
@@ -662,7 +680,9 @@ namespace srouter::rpc
             }
             exits.push_back(std::move(entry));
         }
-        SetJSONResponse(exits, listexits.response);
+        auto payload = _router._jq->call_get([this] { return route_status_json(_router); });
+        payload["exits"] = std::move(exits);
+        SetJSONResponse(payload, listexits.response);
     }
 
     void RPCServer::invoke(UnmapExit& unmapexit)
