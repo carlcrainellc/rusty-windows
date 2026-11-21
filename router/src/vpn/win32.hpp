@@ -27,6 +27,12 @@ namespace srouter::win32
 
         void route_via_interface(NetworkInterface& vpn, std::string addr, std::string mask, std::string cmd);
 
+        // IPv6 off/on on every adapter except our TUN (full-tunnel leak guard).
+        void set_ipv6_on_other_adapters(NetworkInterface& vpn, bool on);
+
+        // Re-add the TUN's IPv6 address(es) and on-link route if something removed them.
+        void ensure_tun_ipv6(NetworkInterface& vpn);
+
       public:
         VPNPlatform(const VPNPlatform&) = delete;
         VPNPlatform(VPNPlatform&&) = delete;

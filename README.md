@@ -55,7 +55,7 @@ known clients, give its operator your address from `my-client-address.txt`; neve
 - The service unmaps an exit that doesn't come up within 90 s, one that stops answering
   for 30 s, and any exit while another VPN takes over the traffic. Your normal connection
   comes back on its own. `exit-guard.json` in `C:\Rusty` says what it last did.
-- While an exit is mapped, IPv6 is off on all adapters. It comes back on unmap, stop, or
+- While an exit is mapped, IPv6 is off on all adapters except sr-tun0. It comes back on unmap, stop, or
   after a crash.
 - If you map a full-tunnel exit and it isn't connected yet, websites won't load by name. Unmap it, or stop the service, and they work again.
 - Windows only, x64 only.

@@ -172,22 +172,74 @@ namespace srouter::win32
         return gateways;
     }
 
-    void VPNPlatform::add_default_route_via_interface(NetworkInterface& vpn)
+    namespace
     {
-        // kill ipv6
+        // PowerShell single-quoted literal: ' doubles.
+        std::string ps_quote(const std::string& v)
+        {
+            std::string out{"'"};
+            for (char c : v)
+            {
+                if (c == '\'')
+                    out += "''";
+                else if (c != '"')
+                    out += c;
+            }
+            return out + "'";
+        }
+    }  // namespace
+
+    void VPNPlatform::set_ipv6_on_other_adapters(NetworkInterface& vpn, bool on)
+    {
+        const auto& ifname = vpn.interface_info().ifname;
         srouter::win32::Exec(
             "WindowsPowerShell\\v1.0\\powershell.exe",
-            "-Command (Disable-NetAdapterBinding -Name \"* \" -ComponentID ms_tcpip6)");
+            fmt::format(
+                "-NoProfile -NonInteractive -Command \"Get-NetAdapterBinding -ComponentID ms_tcpip6 "
+                "-IncludeHidden -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -ne {} }} | "
+                "{}-NetAdapterBinding -ErrorAction SilentlyContinue\"",
+                ps_quote(ifname),
+                on ? "Enable" : "Disable"));
+    }
+
+    void VPNPlatform::ensure_tun_ipv6(NetworkInterface& vpn)
+    {
+        const auto& info = vpn.interface_info();
+        for (const auto& a : info.addrs)
+        {
+            const auto* n6 = std::get_if<ipv6_net>(&a);
+            if (not n6)
+                continue;
+            // Idempotent: "already exists" when the address is still there. Adding it with its
+            // prefix also puts back the on-link fd2e::/N route.
+            srouter::win32::Exec(
+                "netsh.exe",
+                fmt::format(
+                    "interface ipv6 add address interface=\"{}\" address={}/{} store=active",
+                    info.ifname,
+                    n6->ip.to_string(),
+                    n6->mask));
+        }
+    }
+
+    void VPNPlatform::add_default_route_via_interface(NetworkInterface& vpn)
+    {
+        // Stop IPv6 leaking past the tunnel: turn it off on every adapter EXCEPT our own TUN.
+        // .sesh names resolve to AAAA in our fd2e:: range only, so the TUN must keep IPv6 (and
+        // its address + on-link route). Toggling ms_tcpip6 on the TUN wipes that address, and
+        // re-enabling the binding does not bring it back: every .sesh dial then fails with "no
+        // route" until the router restarts.
+        set_ipv6_on_other_adapters(vpn, false);
+        ensure_tun_ipv6(vpn);
 
         default_route_via_interface(vpn, "ADD");
     }
 
     void VPNPlatform::delete_default_route_via_interface(NetworkInterface& vpn)
     {
-        // restore ipv6
-        srouter::win32::Exec(
-            "WindowsPowerShell\\v1.0\\powershell.exe",
-            "-Command (Enable-NetAdapterBinding -Name \"* \" -ComponentID ms_tcpip6)");
+        set_ipv6_on_other_adapters(vpn, true);
+        // Belt and braces for TUNs whose IPv6 was stripped by an older build (or anything else).
+        ensure_tun_ipv6(vpn);
 
         default_route_via_interface(vpn, "DELETE");
     }
