@@ -46,8 +46,15 @@ known clients, give its operator your address from `my-client-address.txt`; neve
 
 ## Known issues
 
-- Other VPNs (NordVPN and the like) fight over the default route. Turn them off first;
-  `rusty-ctl` warns when one is up.
+- Other VPNs (NordVPN and the like) fight over the default route. Disconnect them first.
+  `rusty-ctl map` refuses while another adapter holds the default route or the
+  0/1 + 128/1 pair, going by the live route table, not by whether a VPN app says it's
+  connected. `rusty-ctl preflight` runs the same check and warns about leftover VPN
+  routes and DNS. A kill switch done with firewall rules can't be seen without admin
+  rights; the exit guard below covers that.
+- The service unmaps an exit that doesn't come up within 90 s, one that stops answering
+  for 30 s, and any exit while another VPN takes over the traffic. Your normal connection
+  comes back on its own. `exit-guard.json` in `C:\Rusty` says what it last did.
 - While an exit is mapped, IPv6 is off on all adapters. It comes back on unmap, stop, or
   after a crash.
 - If you map a full-tunnel exit and it isn't connected yet, websites won't load by name. Unmap it, or stop the service, and they work again.

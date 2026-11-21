@@ -144,4 +144,23 @@ impl Control for RpcControl {
             let _ = c.with_auth(self.auth.clone()).halt();
         }
     }
+    fn exits(&mut self) -> Option<Vec<crate::guard::ExitView>> {
+        let l = rusty_rpc::Client::connect(&self.addr, Duration::from_secs(2))
+            .and_then(|c| c.with_auth(self.auth.clone()).list_exits())
+            .ok()?;
+        Some(
+            l.exits
+                .into_iter()
+                .map(|e| crate::guard::ExitView {
+                    address: e.address,
+                    live: e.session_live && e.exit_capable,
+                })
+                .collect(),
+        )
+    }
+    fn unmap(&mut self, address: &str) -> Result<(), String> {
+        rusty_rpc::Client::connect(&self.addr, Duration::from_secs(5))
+            .and_then(|c| c.with_auth(self.auth.clone()).unmap_exit(address))
+            .map_err(|e| e.to_string())
+    }
 }

@@ -47,7 +47,13 @@ enum Cmd {
         /// Access token for a paid exit.
         #[arg(long, default_value = "")]
         token: String,
+        /// Map even if another VPN is holding your connection.
+        #[arg(long)]
+        anyway: bool,
     },
+    /// Check this computer is ready for a full-tunnel exit (no other VPN holding the
+    /// route). Exit code 3 if not. With --json, also what the exit guard last did.
+    Preflight,
     /// Stop using an exit.
     Unmap { address: String },
     /// Move mappings from one exit to another.
@@ -67,6 +73,9 @@ enum Cmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Cmd::Preflight = cli.cmd {
+        return main_preflight(cli.json);
+    }
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -74,6 +83,80 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Exit code for `preflight` when mapping would not work.
+const NOT_READY: u8 = 3;
+
+fn main_preflight(json: bool) -> ExitCode {
+    let p = preflight_now();
+    let last = last_rollback();
+    let (ok, v) = preflight_report(&p, last);
+    if json {
+        println!("{v}");
+    } else {
+        match &p.block {
+            Some(o) => println!("{}", o.message()),
+            None => println!("ok: no other VPN is holding your connection"),
+        }
+        for w in &p.warnings {
+            println!("warning: {w}");
+        }
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(NOT_READY)
+    }
+}
+
+/// `preflight --json`: `{"ok":true,"warnings":[...]}` or `{"ok":false,"code":"other_vpn",
+/// "message":...,"vpn":{...},"warnings":[...]}`, plus `last_rollback` when the exit guard
+/// has unmapped something.
+fn preflight_report(
+    p: &rusty_net::vpn::Preflight,
+    last: Option<serde_json::Value>,
+) -> (bool, serde_json::Value) {
+    let other = p.block.as_ref();
+    let mut v = match other {
+        None => serde_json::json!({ "ok": true }),
+        Some(o) => serde_json::json!({
+            "ok": false,
+            "code": "other_vpn",
+            "message": o.message(),
+            "vpn": o,
+        }),
+    };
+    v["warnings"] = serde_json::json!(p.warnings);
+    if let Some(l) = last {
+        v["last_rollback"] = l;
+    }
+    (other.is_none(), v)
+}
+
+/// The live route table, adapters and the uplink's DNS servers, read now.
+#[cfg(windows)]
+fn preflight_now() -> rusty_net::vpn::Preflight {
+    use rusty_net::DnsSettings;
+    let routes = rusty_net::windows::IpHelperRoutes;
+    let dns = rusty_net::physical_gateway(&routes, &[])
+        .ok()
+        .flatten()
+        .and_then(|g| rusty_net::windows::IpHelperDns.servers(g.if_index).ok())
+        .unwrap_or_default();
+    rusty_net::vpn::preflight(&routes, &dns).unwrap_or_default()
+}
+
+#[cfg(not(windows))]
+fn preflight_now() -> rusty_net::vpn::Preflight {
+    Default::default()
+}
+
+/// `exit-guard.json`, which rusty-service writes next to itself when it unmaps an exit.
+fn last_rollback() -> Option<serde_json::Value> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let b = std::fs::read(dir.join("exit-guard.json")).ok()?;
+    serde_json::from_slice(&b).ok()
 }
 
 fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -131,8 +214,18 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             full,
             range,
             token,
+            anyway,
         } => {
             let req = map_request(address, *full, range, token)?;
+            if !*anyway && takes_default(&req) {
+                let p = preflight_now();
+                if let Some(o) = p.block {
+                    return Err(format!("{} (or add --anyway)", o.message()).into());
+                }
+                for w in &p.warnings {
+                    eprintln!("warning: {w}");
+                }
+            }
             let r = c.map_exit(&req)?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&r)?);
@@ -156,7 +249,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             let full = *full || range.is_empty();
             println!("{}", c.swap_exits(old, new, full, range, token)?);
         }
-        Cmd::Stop => unreachable!("handled above"),
+        Cmd::Stop | Cmd::Preflight => unreachable!("handled above"),
     }
     Ok(())
 }
@@ -252,6 +345,16 @@ fn map_request(
         ip_ranges: range.to_vec(),
         token: token.to_string(),
     })
+}
+
+/// Whether a map sends everything through the exit (the router reads no ranges as all).
+fn takes_default(req: &MapExit) -> bool {
+    req.full_tunnel
+        || req.ip_ranges.is_empty()
+        || req
+            .ip_ranges
+            .iter()
+            .any(|r| r.ends_with("/0") || r.ends_with("/1"))
 }
 
 fn version_line(v: &serde_json::Value) -> String {
@@ -371,5 +474,48 @@ mod tests {
         assert!(l[0].contains("NordWhisper") && l[0].starts_with("warning:"));
         assert!(!l[0].contains("connected"));
         assert!(other_vpn_lines(vec![]).is_empty());
+    }
+
+    #[test]
+    fn preflight_says_why() {
+        let nord = rusty_net::vpn::OtherVpn {
+            name: "NordVPN".into(),
+            adapter: "NordLynx".into(),
+            if_index: 31,
+            route: "0.0.0.0/1".into(),
+        };
+        let p = rusty_net::vpn::Preflight {
+            block: Some(nord),
+            warnings: vec!["w".into()],
+        };
+        let (ok, v) = preflight_report(&p, None);
+        assert!(!ok);
+        assert_eq!(v["code"], "other_vpn");
+        assert_eq!(
+            v["message"],
+            "Another VPN is still holding your connection (NordVPN). Disconnect it or turn off its kill switch, then map again."
+        );
+        assert_eq!(v["vpn"]["adapter"], "NordLynx");
+        assert_eq!(v["warnings"][0], "w");
+        let (ok, v) = preflight_report(
+            &Default::default(),
+            Some(json!({"why": "exit_not_answering"})),
+        );
+        assert!(ok);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["last_rollback"]["why"], "exit_not_answering");
+    }
+
+    #[test]
+    fn which_maps_take_the_default_route() {
+        assert!(takes_default(
+            &map_request("a.sesh", true, &[], "").unwrap()
+        ));
+        assert!(takes_default(
+            &map_request("a.sesh", false, &[], "").unwrap()
+        ));
+        assert!(!takes_default(
+            &map_request("a.sesh", false, &["10.0.0.0/8".into()], "").unwrap()
+        ));
     }
 }

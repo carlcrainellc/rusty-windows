@@ -2,6 +2,7 @@
 //! crashes, stop after a crash loop, and always put routes and DNS back.
 
 pub mod config;
+pub mod guard;
 pub mod policy;
 pub mod process;
 pub mod runner;

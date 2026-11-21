@@ -38,6 +38,26 @@ pub struct Config {
     /// How long to wait after asking the router to stop before killing it.
     #[serde(default = "default_stop")]
     pub stop_timeout_secs: u64,
+    /// Unmap an exit that doesn't answer, stops answering, or loses the traffic to another
+    /// VPN, so the computer never sits with dead routes.
+    #[serde(default = "default_true")]
+    pub exit_guard: bool,
+    /// Seconds a newly mapped exit gets to come up.
+    #[serde(default = "default_map_timeout")]
+    pub exit_map_timeout_secs: u64,
+    /// Seconds a working exit may be down before it is unmapped.
+    #[serde(default = "default_lost_grace")]
+    pub exit_lost_grace_secs: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_map_timeout() -> u64 {
+    90
+}
+fn default_lost_grace() -> u64 {
+    30
 }
 
 fn default_rpc() -> String {
@@ -58,6 +78,9 @@ fn default_window() -> u64 {
 fn default_stop() -> u64 {
     15
 }
+
+/// Name of the file the exit guard writes what it last did to.
+pub const GUARD_FILE: &str = "exit-guard.json";
 
 /// Drops the `\\?\` prefix Windows' canonical paths carry, when the rest is an ordinary
 /// drive path.
@@ -93,6 +116,14 @@ impl Config {
                 .map_err(|_| format!("set_dns: {d} isn't an IP address"))?;
         }
         Ok(c)
+    }
+
+    /// `exit-guard.json`, in the same folder as the journal (C:\Rusty).
+    pub fn guard_file(&self) -> PathBuf {
+        self.journal
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(GUARD_FILE)
     }
 
     pub fn policy(&self) -> RestartPolicy {

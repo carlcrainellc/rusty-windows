@@ -1,10 +1,12 @@
 //! Starts the router, watches it, restarts it on crash, and puts the network back.
 
+use crate::guard::{ExitView, Guard, GuardTimes, LastRollback};
 use crate::policy::{CrashHistory, Decision, RestartPolicy};
 use crate::sweep;
 use rusty_net::{physical_gateway, DnsSettings, NetGuard, RouteTable};
 use std::io;
 use std::net::IpAddr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,6 +28,14 @@ pub trait Control {
     fn ready(&mut self) -> bool;
     /// Asks for a clean shutdown. Errors are fine; we kill it after a timeout anyway.
     fn halt(&mut self);
+    /// Mapped exits, or `None` if the router didn't answer.
+    fn exits(&mut self) -> Option<Vec<ExitView>> {
+        None
+    }
+    /// Unmaps one exit. The router takes its routes down.
+    fn unmap(&mut self, _address: &str) -> Result<(), String> {
+        Err("not supported".into())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -59,6 +69,12 @@ pub struct Options {
     pub dns_recheck: Duration,
     pub stop_timeout: Duration,
     pub poll: Duration,
+    /// Exit guard timings; `None` turns the guard off.
+    pub guard: Option<GuardTimes>,
+    /// How often the guard looks.
+    pub guard_every: Duration,
+    /// Where the guard writes what it last did (`exit-guard.json`).
+    pub guard_file: Option<PathBuf>,
 }
 
 pub type Log<'a> = &'a mut dyn FnMut(&str);
@@ -142,7 +158,13 @@ impl<L: Launcher, K: Control, R: RouteTable, D: DnsSettings> Supervisor<L, K, R,
                 "put back {back} loopback route(s) the router removed"
             ));
         }
-        let left = sweep::leftovers(before, &after);
+        let table = self.net.route_table();
+        let left = sweep::leftovers_except(before, &after, |i| {
+            table.is_tunnel(i)
+                && !table
+                    .name_of(i)
+                    .is_some_and(|n| rusty_net::vpn::is_own_adapter(&n))
+        });
         if left.is_empty() {
             return;
         }
@@ -214,6 +236,121 @@ impl<L: Launcher, K: Control, R: RouteTable, D: DnsSettings> Supervisor<L, K, R,
         }
     }
 
+    /// One look by the exit guard. Unmaps what it says to and remembers to check, a few
+    /// seconds later, that nothing of ours is left holding the route.
+    fn check_exits(&mut self, g: &mut GuardRun, log: Log) {
+        let Some(exits) = self.control.exits() else {
+            return;
+        };
+        let now = Instant::now();
+        let other = match rusty_net::vpn::other_vpn(self.net.route_table()) {
+            Ok(v) => v,
+            Err(e) => {
+                log(&format!("couldn't read routes for the exit guard: {e}"));
+                None
+            }
+        };
+        let first_look = !g.uplink_seen;
+        g.uplink_seen = true;
+        if let Some(gw) = g
+            .uplink
+            .observe_table(self.net.route_table())
+            .ok()
+            .flatten()
+        {
+            if !exits.is_empty() && !first_look {
+                let what = match gw {
+                    rusty_net::GatewayEvent::Lost(o) => format!("uplink {} went away", o.next_hop),
+                    rusty_net::GatewayEvent::Found(n) => format!("uplink is {}", n.next_hop),
+                    rusty_net::GatewayEvent::Changed { old, new } => {
+                        format!("uplink moved from {} to {}", old.next_hop, new.next_hop)
+                    }
+                };
+                log(&format!(
+                    "{what} while an exit is mapped; the router moves its first hops"
+                ));
+            }
+        }
+        if let Some(u) = g.guard.tick(now, &exits, other.as_ref()) {
+            log(&format!("exit guard: {}", u.message));
+            for a in &u.addresses {
+                if let Err(e) = self.control.unmap(a) {
+                    log(&format!("exit guard: couldn't unmap {a}: {e}"));
+                }
+            }
+            if let Some(path) = &self.opts.guard_file {
+                let rec = LastRollback {
+                    time: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs()),
+                    addresses: u.addresses.clone(),
+                    why: u.why.clone(),
+                    message: u.message.clone(),
+                };
+                if let Ok(b) = serde_json::to_vec_pretty(&rec) {
+                    let tmp = path.with_extension("json.tmp");
+                    if std::fs::write(&tmp, b)
+                        .and_then(|_| std::fs::rename(&tmp, path))
+                        .is_err()
+                    {
+                        log(&format!("couldn't write {}", path.display()));
+                    }
+                }
+            }
+            g.settle_at = Some(now + Duration::from_secs(5));
+            g.rolled_back = true;
+            return;
+        }
+        // Nothing mapped, but our tunnel still carries the traffic: the router didn't take
+        // its routes down (or a rollback just happened). Two looks in a row, then clean up.
+        let stale = exits.is_empty()
+            && rusty_net::vpn::own_tunnel_holds(self.net.route_table()).unwrap_or(false);
+        g.stale_looks = if stale { g.stale_looks + 1 } else { 0 };
+        let settle_due = g.settle_at.is_some_and(|t| now >= t) && exits.is_empty();
+        if g.stale_looks >= 2 || settle_due {
+            g.settle_at = None;
+            g.stale_looks = 0;
+            self.settle(std::mem::take(&mut g.rolled_back), log);
+        }
+    }
+
+    /// After a rollback: remove our full-tunnel routes if they're still there and turn IPv6
+    /// back on where the router left it off.
+    fn settle(&mut self, ipv6_too: bool, log: Log) {
+        let routes = match self.net.route_table().routes() {
+            Ok(r) => r,
+            Err(e) => return log(&format!("couldn't read routes: {e}")),
+        };
+        let mine: Vec<rusty_net::Route> = routes
+            .into_iter()
+            .filter(|r| rusty_net::vpn::is_half_default(&r.dest))
+            .filter(|r| {
+                self.net
+                    .route_table()
+                    .name_of(r.if_index)
+                    .is_some_and(|n| rusty_net::vpn::is_own_adapter(&n))
+            })
+            .collect();
+        let mut removed = 0;
+        for r in &mine {
+            if self.net_routes_mut().delete(r).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            log(&format!(
+                "removed {removed} tunnel route(s) left with no exit mapped"
+            ));
+        }
+        if ipv6_too {
+            match self.net.reenable_ipv6() {
+                Ok(v) if !v.is_empty() => log(&format!("turned IPv6 back on for {}", v.join(", "))),
+                Ok(_) => {}
+                Err(e) => log(&format!("couldn't turn IPv6 back on: {e}")),
+            }
+        }
+    }
+
     fn net_routes_mut(&mut self) -> &mut R {
         self.net.route_table_mut()
     }
@@ -233,6 +370,8 @@ impl<L: Launcher, K: Control, R: RouteTable, D: DnsSettings> Supervisor<L, K, R,
             let mut ready = false;
             let mut next_dns_check = Instant::now();
             let mut dns_state = DnsState::default();
+            let mut guard_run = self.opts.guard.map(GuardRun::new);
+            let mut next_guard_check = Instant::now();
             let code = loop {
                 if stop.is_set() {
                     log("stopping router");
@@ -257,13 +396,19 @@ impl<L: Launcher, K: Control, R: RouteTable, D: DnsSettings> Supervisor<L, K, R,
                 if let Some(code) = child.try_wait()? {
                     break code;
                 }
+                if (self.opts.set_dns.is_some() || guard_run.is_some()) && !ready {
+                    ready = self.control.ready();
+                }
                 if let Some(dns) = self.opts.set_dns {
-                    if !ready {
-                        ready = self.control.ready();
-                    }
                     if ready && Instant::now() >= next_dns_check {
                         next_dns_check = Instant::now() + self.opts.dns_recheck;
                         self.check_dns(dns, &mut dns_state, log);
+                    }
+                }
+                if let Some(g) = guard_run.as_mut() {
+                    if ready && Instant::now() >= next_guard_check {
+                        next_guard_check = Instant::now() + self.opts.guard_every;
+                        self.check_exits(g, log);
                     }
                 }
                 std::thread::sleep(self.opts.poll);
@@ -287,6 +432,29 @@ impl<L: Launcher, K: Control, R: RouteTable, D: DnsSettings> Supervisor<L, K, R,
                     });
                 }
             }
+        }
+    }
+}
+
+/// The guard's state for one router run.
+struct GuardRun {
+    guard: Guard,
+    uplink: rusty_net::GatewayWatcher,
+    settle_at: Option<Instant>,
+    rolled_back: bool,
+    stale_looks: u32,
+    uplink_seen: bool,
+}
+
+impl GuardRun {
+    fn new(times: GuardTimes) -> Self {
+        GuardRun {
+            guard: Guard::new(times),
+            uplink: rusty_net::GatewayWatcher::new(Vec::new()),
+            settle_at: None,
+            rolled_back: false,
+            stale_looks: 0,
+            uplink_seen: false,
         }
     }
 }
@@ -322,6 +490,12 @@ mod tests {
         }
         fn index_of(&self, n: &str) -> io::Result<Option<u32>> {
             self.0.borrow().index_of(n)
+        }
+        fn name_of(&self, i: u32) -> Option<String> {
+            self.0.borrow().name_of(i)
+        }
+        fn description_of(&self, i: u32) -> Option<String> {
+            self.0.borrow().description_of(i)
         }
     }
 
@@ -420,6 +594,9 @@ mod tests {
             dns_recheck: Duration::ZERO,
             stop_timeout: Duration::from_millis(30),
             poll: Duration::from_millis(1),
+            guard: None,
+            guard_every: Duration::ZERO,
+            guard_file: None,
         }
     }
 
@@ -702,5 +879,134 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l == "no adapter named Nope; leaving DNS alone"));
+    }
+
+    /// Router control for guard tests: one exit mapped (never live); unmapping it takes
+    /// it off the list but, like a misbehaving router, leaves the tunnel's /1 routes.
+    struct GuardControl {
+        mapped: Rc<RefCell<Vec<String>>>,
+        unmapped: Rc<RefCell<Vec<String>>>,
+    }
+    impl Control for GuardControl {
+        fn ready(&mut self) -> bool {
+            true
+        }
+        fn halt(&mut self) {}
+        fn exits(&mut self) -> Option<Vec<ExitView>> {
+            Some(
+                self.mapped
+                    .borrow()
+                    .iter()
+                    .map(|a| ExitView {
+                        address: a.clone(),
+                        live: false,
+                    })
+                    .collect(),
+            )
+        }
+        fn unmap(&mut self, address: &str) -> Result<(), String> {
+            self.mapped.borrow_mut().retain(|a| a != address);
+            self.unmapped.borrow_mut().push(address.to_string());
+            Ok(())
+        }
+    }
+
+    fn guard_world() -> World {
+        let mut m = MemRoutes::with(vec![
+            r("0.0.0.0/0", "192.168.1.1", 7, 25),
+            r("0.0.0.0/1", "10.192.0.0", TUN, 5),
+            r("128.0.0.0/1", "10.192.0.0", TUN, 5),
+        ]);
+        m.if_metrics.insert(7, 35);
+        m.if_metrics.insert(TUN, 5);
+        m.tunnels.push(TUN);
+        m.names.insert("sr-tun0".into(), TUN);
+        Rc::new(RefCell::new(m))
+    }
+
+    fn run_guarded(
+        w: &World,
+        name: &str,
+        steps: Steps,
+    ) -> (Vec<String>, Vec<String>, std::path::PathBuf) {
+        let (net, _) = NetGuard::open(WorldRoutes(w.clone()), tunnel_dns(), journal(name)).unwrap();
+        let mut o = opts(None);
+        o.policy.max_crashes = 1;
+        o.guard = Some(GuardTimes {
+            map_timeout: Duration::from_millis(20),
+            lost_grace: Duration::from_millis(20),
+        });
+        let gf = journal(&format!("{name}-guard"));
+        o.guard_file = Some(gf.clone());
+        let unmapped = Rc::new(RefCell::new(Vec::new()));
+        let mut s = Supervisor {
+            launcher: TunnelLauncher {
+                world: w.clone(),
+                steps,
+                die_at: 400,
+            },
+            control: GuardControl {
+                mapped: Rc::new(RefCell::new(vec!["x.sesh".into()])),
+                unmapped: unmapped.clone(),
+            },
+            net,
+            opts: o,
+        };
+        let mut lines = Vec::new();
+        s.run(&StopFlag::default(), &mut |l| lines.push(l.to_string()))
+            .unwrap();
+        let u = unmapped.borrow().clone();
+        (lines, u, gf)
+    }
+
+    #[test]
+    fn guard_unmaps_a_dead_exit_and_clears_our_routes() {
+        let w = guard_world();
+        let (lines, unmapped, gf) = run_guarded(&w, "guard-dead", vec![]);
+        assert_eq!(unmapped, vec!["x.sesh".to_string()]);
+        assert!(
+            lines.iter().any(|l| l.contains("isn't answering")),
+            "{lines:#?}"
+        );
+        let rec: LastRollback = serde_json::from_slice(&std::fs::read(&gf).unwrap()).unwrap();
+        assert_eq!(rec.why, crate::guard::Why::ExitNotAnswering);
+        // The /1 halves the router left are gone; the uplink's default route stays.
+        let left = w.borrow().table.clone();
+        assert!(
+            !left
+                .iter()
+                .any(|x| rusty_net::vpn::is_half_default(&x.dest)),
+            "{left:?}"
+        );
+        assert!(left.iter().any(|x| x.dest.is_default() && x.if_index == 7));
+        let _ = std::fs::remove_file(gf);
+    }
+
+    #[test]
+    fn guard_unmaps_when_another_vpn_takes_over() {
+        let w = guard_world();
+        // Nord comes up on poll 2 with a better /1 pair; the guard sees it before the
+        // map timeout matters.
+        let steps: Steps = vec![(2, |m| {
+            m.table.push(r("0.0.0.0/1", "10.8.1.1", 23, 0));
+            m.table.push(r("128.0.0.0/1", "10.8.1.1", 23, 0));
+            m.if_metrics.insert(23, 1);
+            m.tunnels.push(23);
+            m.names.insert("NordLynx".into(), 23);
+        })];
+        let (lines, unmapped, gf) = run_guarded(&w, "guard-vpn", steps);
+        assert_eq!(unmapped, vec!["x.sesh".to_string()]);
+        let rec: LastRollback = serde_json::from_slice(&std::fs::read(&gf).unwrap()).unwrap();
+        assert!(
+            rec.why == crate::guard::Why::OtherVpn
+                || rec.why == crate::guard::Why::ExitNotAnswering,
+            "{lines:#?}"
+        );
+        // Nord's own routes are never touched.
+        assert_eq!(
+            w.borrow().table.iter().filter(|x| x.if_index == 23).count(),
+            2
+        );
+        let _ = std::fs::remove_file(gf);
     }
 }

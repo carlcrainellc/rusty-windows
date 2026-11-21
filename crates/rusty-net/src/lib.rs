@@ -12,6 +12,7 @@
 pub mod ip;
 pub mod journal;
 pub mod mem;
+pub mod vpn;
 #[cfg(windows)]
 pub mod windows;
 
@@ -59,6 +60,10 @@ pub trait RouteTable {
     }
     /// The adapter's name ("Wi-Fi", "NordLynx"), if known.
     fn name_of(&self, _if_index: u32) -> Option<String> {
+        None
+    }
+    /// The adapter's description ("TAP-NordVPN Windows Adapter V9"), if known.
+    fn description_of(&self, _if_index: u32) -> Option<String> {
         None
     }
 }
@@ -274,6 +279,33 @@ impl<R: RouteTable, D: DnsSettings> NetGuard<R, D> {
         }
         self.journal.ipv6_enabled = self.ipv6.enabled()?;
         self.save()
+    }
+
+    /// Turns IPv6 back on for adapters noted with it on that are off now, and keeps the
+    /// note (the router may turn it off again on the next map). Returns the adapters.
+    pub fn reenable_ipv6(&mut self) -> io::Result<Vec<String>> {
+        if self.journal.ipv6_enabled.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now = self.ipv6.enabled()?;
+        let mut done = Vec::new();
+        let mut first_err = None;
+        for a in self.journal.ipv6_enabled.clone() {
+            if now.contains(&a) {
+                continue;
+            }
+            match self.ipv6.enable(&a) {
+                Ok(()) => done.push(a),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) if done.is_empty() => Err(e),
+            _ => Ok(done),
+        }
     }
 
     pub fn journal(&self) -> &Journal {

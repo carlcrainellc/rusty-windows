@@ -17,6 +17,10 @@ pub struct MemRoutes {
     pub tunnels: Vec<u32>,
     /// Adapter names to interface indexes.
     pub names: BTreeMap<String, u32>,
+    /// Adapter descriptions by interface index.
+    pub descriptions: BTreeMap<u32, String>,
+    /// Interfaces whose IPv4 metric can't be read (adapter gone or down).
+    pub missing_metric: Vec<u32>,
 }
 
 impl MemRoutes {
@@ -53,6 +57,9 @@ impl RouteTable for MemRoutes {
         Ok(())
     }
     fn interface_metric(&self, if_index: u32) -> io::Result<u32> {
+        if self.missing_metric.contains(&if_index) {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no IPv4 interface"));
+        }
         Ok(self.if_metrics.get(&if_index).copied().unwrap_or(0))
     }
     fn is_tunnel(&self, if_index: u32) -> bool {
@@ -66,6 +73,9 @@ impl RouteTable for MemRoutes {
             .iter()
             .find(|(_, &i)| i == if_index)
             .map(|(n, _)| n.clone())
+    }
+    fn description_of(&self, if_index: u32) -> Option<String> {
+        self.descriptions.get(&if_index).cloned()
     }
 }
 

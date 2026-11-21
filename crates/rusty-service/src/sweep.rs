@@ -35,6 +35,25 @@ fn router_shaped(r: &Route) -> bool {
 
 /// Routes to remove: new since `before` and shaped like something the router adds.
 pub fn leftovers(before: &[Route], after: &[Route]) -> Vec<Route> {
+    leftovers_except(before, after, |_| false)
+}
+
+/// The router's `route.exe` metric for its first-hop pins (`m_Metric` in vpn/win32.hpp).
+pub const ROUTER_PIN_METRIC: u32 = 2;
+
+/// Like [`leftovers`], but never touches another VPN. `other_vpn_iface` says whether an
+/// interface is someone else's tunnel adapter. Routes on those stay. If such a VPN holds
+/// a default route, its own host route to its server looks just like a first-hop pin, so
+/// then only pins with the router's metric are removed.
+pub fn leftovers_except(
+    before: &[Route],
+    after: &[Route],
+    other_vpn_iface: impl Fn(u32) -> bool,
+) -> Vec<Route> {
+    let vpn_up = after.iter().any(|r| {
+        (r.dest.prefix == 0 || rusty_net::vpn::is_half_default(&r.dest))
+            && other_vpn_iface(r.if_index)
+    });
     after
         .iter()
         .filter(|r| {
@@ -43,6 +62,8 @@ pub fn leftovers(before: &[Route], after: &[Route]) -> Vec<Route> {
                 .any(|b| b.dest == r.dest && b.next_hop == r.next_hop && b.if_index == r.if_index)
         })
         .filter(|r| router_shaped(r))
+        .filter(|r| !other_vpn_iface(r.if_index))
+        .filter(|r| !(vpn_up && r.dest.prefix == 32 && r.metric != ROUTER_PIN_METRIC))
         .cloned()
         .collect()
 }
@@ -116,5 +137,29 @@ mod tests {
             .collect();
         assert_eq!(back, vec!["127.0.0.0/8", "127.255.255.255/32"]);
         assert!(vanished_loopback(&before, &before).is_empty());
+    }
+
+    #[test]
+    fn another_vpn_that_came_up_meanwhile_is_left_alone() {
+        let before = vec![r("0.0.0.0/0", "192.168.1.1", 7)];
+        let mut after = before.clone();
+        let pin = |d: &str, m: u32| Route {
+            dest: d.parse().unwrap(),
+            next_hop: "192.168.1.1".parse().unwrap(),
+            if_index: 7,
+            metric: m,
+        };
+        after.extend([
+            pin("198.51.100.4/32", ROUTER_PIN_METRIC), // router pin: remove
+            r("0.0.0.0/1", "172.16.0.1", 40),          // our tunnel half: remove
+            r("0.0.0.0/1", "10.8.1.1", 23),            // Nord's half: keep
+            r("128.0.0.0/1", "10.8.1.1", 23),          // Nord's half: keep
+            pin("185.1.2.3/32", 0),                    // Nord's route to its server: keep
+        ]);
+        let gone: Vec<String> = leftovers_except(&before, &after, |i| i == 23)
+            .iter()
+            .map(|r| r.dest.to_string())
+            .collect();
+        assert_eq!(gone, vec!["198.51.100.4/32", "0.0.0.0/1"]);
     }
 }

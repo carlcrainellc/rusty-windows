@@ -145,6 +145,12 @@ pub fn supervise(
             dns_recheck: Duration::from_secs(5),
             stop_timeout: Duration::from_secs(cfg.stop_timeout_secs),
             poll: Duration::from_millis(250),
+            guard: cfg.exit_guard.then(|| crate::guard::GuardTimes {
+                map_timeout: Duration::from_secs(cfg.exit_map_timeout_secs),
+                lost_grace: Duration::from_secs(cfg.exit_lost_grace_secs),
+            }),
+            guard_every: Duration::from_secs(2),
+            guard_file: Some(cfg.guard_file()),
         },
     };
     sup.run(stop, log).map_err(|e| e.to_string())

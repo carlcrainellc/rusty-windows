@@ -142,6 +142,10 @@ impl RouteTable for IpHelperRoutes {
         if_row(if_index).map(|(_, _, alias)| alias)
     }
 
+    fn description_of(&self, if_index: u32) -> Option<String> {
+        if_row(if_index).map(|(_, description, _)| description)
+    }
+
     fn index_of(&self, name: &str) -> io::Result<Option<u32>> {
         let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         let mut luid = NET_LUID_LH::default();
