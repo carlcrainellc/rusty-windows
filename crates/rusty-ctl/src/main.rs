@@ -28,7 +28,7 @@ struct Cli {
     cmd: Cmd,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Cmd {
     /// Router version and whether exit routes are up.
     Status,
@@ -42,6 +42,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "range")]
         full: bool,
         /// Send only these ranges through the exit (repeatable), e.g. `--range 10.0.0.0/8`.
+        /// One of --full or --range is required: the router treats a map with no ranges as 0.0.0.0/0.
         #[arg(long)]
         range: Vec<String>,
         /// Access token for a paid exit.
@@ -246,8 +247,13 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             range,
             token,
         } => {
-            let full = *full || range.is_empty();
-            println!("{}", c.swap_exits(old, new, full, range, token)?);
+            if !*full && range.is_empty() {
+                return Err(
+                    "say --full to send all traffic through the new exit, or --range for a prefix"
+                        .into(),
+                );
+            }
+            println!("{}", c.swap_exits(old, new, *full, range, token)?);
         }
         Cmd::Stop | Cmd::Preflight => unreachable!("handled above"),
     }
@@ -329,7 +335,10 @@ fn other_vpn_lines(names: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// With no ranges given, map everything; that's what people mean by "use this exit".
+/// `--full` is a full tunnel. `--range` sends only those ranges. One of them is
+/// required: this router's map_exit treats an empty range list as 0.0.0.0/0, and
+/// it does not read the full_tunnel field, so a bare `map` would steal all
+/// traffic.
 fn map_request(
     address: &str,
     full: bool,
@@ -339,10 +348,20 @@ fn map_request(
     if !address.ends_with(".sesh") {
         return Err(format!("{address} isn't a .sesh address"));
     }
+    if !full && range.is_empty() {
+        return Err(
+            "say --full to send all traffic through the exit, or --range for a prefix".into(),
+        );
+    }
+    let ip_ranges = if full && range.is_empty() {
+        vec!["0.0.0.0/0".into()]
+    } else {
+        range.to_vec()
+    };
     Ok(MapExit {
         address: address.to_string(),
-        full_tunnel: full || range.is_empty(),
-        ip_ranges: range.to_vec(),
+        full_tunnel: full,
+        ip_ranges,
         token: token.to_string(),
     })
 }
@@ -414,13 +433,37 @@ mod tests {
     }
 
     #[test]
-    fn map_defaults_to_full_tunnel() {
-        let r = map_request("a.sesh", false, &[], "").unwrap();
+    fn map_requires_full_or_range() {
+        let err = map_request("a.sesh", false, &[], "").unwrap_err();
+        assert!(err.contains("--full"), "{err}");
+        let r = map_request("a.sesh", true, &[], "").unwrap();
         assert!(r.full_tunnel);
+        assert_eq!(r.ip_ranges, ["0.0.0.0/0"]);
         let r = map_request("a.sesh", false, &["10.0.0.0/8".into()], "t").unwrap();
         assert!(!r.full_tunnel);
+        assert_eq!(r.ip_ranges, ["10.0.0.0/8"]);
         assert_eq!(r.token, "t");
         assert!(map_request("example.com", true, &[], "").is_err());
+    }
+
+    #[test]
+    fn cli_map_without_flags_still_parses() {
+        let c = Cli::try_parse_from(["rusty-ctl", "map", "a.sesh"]).unwrap();
+        match c.cmd {
+            Cmd::Map { full, range, .. } => {
+                assert!(!full);
+                assert!(range.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let c = Cli::try_parse_from(["rusty-ctl", "map", "a.sesh", "--full"]).unwrap();
+        match c.cmd {
+            Cmd::Map { full, range, .. } => {
+                assert!(full);
+                assert!(range.is_empty());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -511,9 +554,11 @@ mod tests {
         assert!(takes_default(
             &map_request("a.sesh", true, &[], "").unwrap()
         ));
-        assert!(takes_default(
-            &map_request("a.sesh", false, &[], "").unwrap()
-        ));
+        // What the router does with no ranges at all.
+        assert!(takes_default(&MapExit {
+            address: "a.sesh".into(),
+            ..Default::default()
+        }));
         assert!(!takes_default(
             &map_request("a.sesh", false, &["10.0.0.0/8".into()], "").unwrap()
         ));
