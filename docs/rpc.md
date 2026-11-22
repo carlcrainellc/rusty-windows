@@ -16,3 +16,11 @@ to loopback connections only.
 
 `list_exits` and `map_exit` also return `routes_up` (older builds leave it out; `rusty-ctl` then says the routes are unknown) and, when routes are down,
 `routes_reason`.
+
+`routes_up` is true as soon as an exit is mapped, whether or not the session to it is
+live. So `rusty-ctl map` first maps the exit for `192.0.2.1/32` only (a documentation
+address), which starts the session without touching the default route, polls
+`list_exits` until that exit has `session_live` and `exit_capable`, and only then sends
+the real `map_exit`. If it times out it calls `unmap_exit`. `rusty-ctl status` and
+`exits` say "blocked" rather than "up" when routes are in but no mapped exit has a live
+session.

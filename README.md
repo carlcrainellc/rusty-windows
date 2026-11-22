@@ -35,10 +35,14 @@ cd C:\Rusty
 sc.exe start RustySessionRouter
 .\rusty-ctl.exe status
 .\rusty-ctl.exe map <exit>.sesh --full      # everything through the exit
-.\rusty-ctl.exe exits                       # wait for "session to exit: live"
+.\rusty-ctl.exe exits                       # shows "session to exit: live"
 .\rusty-ctl.exe unmap <exit>.sesh           # or just unmap to drop every exit
 .\rusty-ctl.exe stop                        # stops the service; network back as before
 ```
+
+`map` waits up to 45 s (`--wait`) for a live session to the exit before it routes anything
+through it. If the exit doesn't answer, it unmaps it, leaves your routes as they were and
+says "Couldn't reach that exit". `swap` does the same for the new exit.
 
 `--range 10.0.0.0/8` instead of `--full` sends only that range. If the exit only lets in
 known clients, give its operator your address from `my-client-address.txt`; never share
@@ -57,7 +61,10 @@ known clients, give its operator your address from `my-client-address.txt`; neve
   comes back on its own. `exit-guard.json` in `C:\Rusty` says what it last did.
 - While an exit is mapped, IPv6 is off on all adapters except sr-tun0. It comes back on unmap, stop, or
   after a crash.
-- If you map a full-tunnel exit and it isn't connected yet, websites won't load by name. Unmap it, or stop the service, and they work again.
+- If something maps a full-tunnel exit over RPC without waiting (`--wait 0`, or another
+  program), the router puts the routes in before the session is up and nothing gets out
+  until it is. `rusty-ctl status` then says "exit routes: blocked". Unmap it, or stop the
+  service, and your connection works again.
 - Windows only, x64 only.
 
 ## Build

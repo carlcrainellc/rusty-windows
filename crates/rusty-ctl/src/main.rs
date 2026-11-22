@@ -1,7 +1,7 @@
 //! `rusty-ctl`: check on and steer a running Session Router from the command line.
 
 use clap::{Parser, Subcommand};
-use rusty_rpc::{Client, MapExit, DEFAULT_ADDR};
+use rusty_rpc::{Client, ExitList, MapExit, DEFAULT_ADDR};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -51,6 +51,10 @@ enum Cmd {
         /// Map even if another VPN is holding your connection.
         #[arg(long)]
         anyway: bool,
+        /// Seconds to wait for a live session to the exit before routing anything
+        /// through it. 0 maps straight away (routes can go up before the exit answers).
+        #[arg(long, default_value_t = DEFAULT_WAIT, value_name = "SECS")]
+        wait: u64,
     },
     /// Check this computer is ready for a full-tunnel exit (no other VPN holding the
     /// route). Exit code 3 if not. With --json, also what the exit guard last did.
@@ -67,6 +71,9 @@ enum Cmd {
         range: Vec<String>,
         #[arg(long, default_value = "")]
         token: String,
+        /// Seconds to wait for a live session to the new exit before moving anything.
+        #[arg(long, default_value_t = DEFAULT_WAIT, value_name = "SECS")]
+        wait: u64,
     },
     /// Stop the RustySessionRouter service (unmaps exits and puts the network back).
     Stop,
@@ -187,7 +194,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 println!("router: {}", version_line(&version));
                 match exits {
                     Ok(e) => {
-                        println!("{}", routes_line(e.routes_up, e.routes_reason.as_deref()));
+                        println!("{}", routes_summary(&e));
                         println!("exits mapped: {}", e.exits.len());
                     }
                     Err(e) => println!("exits: {e}"),
@@ -200,13 +207,18 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&l)?);
             } else {
-                println!("{}", routes_line(l.routes_up, l.routes_reason.as_deref()));
+                println!("{}", routes_summary(&l));
                 if l.exits.is_empty() {
                     println!("no exits mapped");
                 }
                 for e in &l.exits {
                     let state = session_state(e.session_live, e.exit_capable);
-                    println!("{}  {}  [{}]", e.address, state, e.ranges.join(", "));
+                    let ranges = if is_probe(e) {
+                        "waiting for the session, nothing routed".to_string()
+                    } else {
+                        e.ranges.join(", ")
+                    };
+                    println!("{}  {}  [{}]", e.address, state, ranges);
                 }
             }
         }
@@ -216,6 +228,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             range,
             token,
             anyway,
+            wait,
         } => {
             let req = map_request(address, *full, range, token)?;
             if !*anyway && takes_default(&req) {
@@ -226,6 +239,9 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                 for w in &p.warnings {
                     eprintln!("warning: {w}");
                 }
+            }
+            if *wait > 0 {
+                wait_live(&mut c, address, token, Duration::from_secs(*wait))?;
             }
             let r = c.map_exit(&req)?;
             if cli.json {
@@ -261,6 +277,7 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             full,
             range,
             token,
+            wait,
         } => {
             if !*full && range.is_empty() {
                 return Err(
@@ -268,11 +285,152 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                         .into(),
                 );
             }
-            println!("{}", c.swap_exits(old, new, *full, range, token)?);
+            if !new.ends_with(".sesh") {
+                return Err(format!("{new} isn't a .sesh address").into());
+            }
+            // The old exit keeps its routes until the new one answers.
+            if *wait > 0 && !same_exit(old, new) {
+                wait_live(&mut c, new, token, Duration::from_secs(*wait))?;
+            }
+            let probed = *wait > 0 && !same_exit(old, new);
+            match c.swap_exits(old, new, *full, range, token) {
+                Ok(m) => println!("{m}"),
+                Err(e) => {
+                    if probed {
+                        let _ = c.unmap_exit(new);
+                    }
+                    return Err(e.into());
+                }
+            }
         }
         Cmd::Stop | Cmd::Preflight => unreachable!("handled above"),
     }
     Ok(())
+}
+
+/// How long `map` and `swap` wait for the session to an exit by default.
+const DEFAULT_WAIT: u64 = 45;
+
+/// While waiting for a session, the exit is mapped for this one documentation address
+/// only (TEST-NET-1, never used on the internet). That starts the session without putting
+/// in the default route, so if the exit never answers nothing else is blackholed.
+const PROBE_RANGE: &str = "192.0.2.1/32";
+
+fn is_probe(e: &rusty_rpc::ExitEntry) -> bool {
+    e.ranges.len() == 1 && e.ranges[0] == PROBE_RANGE
+}
+
+fn same_exit(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+/// Why an exit didn't come up.
+#[derive(Debug, PartialEq, Eq)]
+enum WaitFail {
+    /// No session at all: wrong or stale address, or the exit is offline.
+    NoSession,
+    /// A session, but the far end isn't an exit that lets us in.
+    NotAnExit,
+    /// The mapping went away while we waited (unmapped elsewhere).
+    Gone,
+    /// The router stopped answering.
+    Rpc(String),
+}
+
+impl WaitFail {
+    fn message(&self, secs: u64) -> String {
+        match self {
+            WaitFail::NoSession => format!(
+                "Couldn't reach that exit. Check the address. (no session to it after {secs} s; your routes were not changed)"
+            ),
+            WaitFail::NotAnExit => format!(
+                "Couldn't reach that exit. Check the address. If it's right, the exit may only let in known clients: give its operator your address from my-client-address.txt. (no working session after {secs} s; your routes were not changed)"
+            ),
+            WaitFail::Gone => "The exit was unmapped while waiting for it (your routes were not changed)".to_string(),
+            WaitFail::Rpc(e) => format!("lost the router while waiting for the exit: {e}"),
+        }
+    }
+}
+
+/// Polls `list` until `address` has a live session to an exit. `sleep` is how time
+/// passes (the real one sleeps; tests just count), so this gives up after about
+/// `timeout`.
+fn wait_for_session(
+    address: &str,
+    timeout: Duration,
+    step: Duration,
+    mut list: impl FnMut() -> Result<ExitList, String>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<(), WaitFail> {
+    let mut waited = Duration::ZERO;
+    let mut answered = false;
+    loop {
+        let l = list().map_err(WaitFail::Rpc)?;
+        match l.exits.iter().find(|e| same_exit(&e.address, address)) {
+            None => return Err(WaitFail::Gone),
+            Some(e) if e.session_live && e.exit_capable => return Ok(()),
+            Some(e) => answered |= e.session_live,
+        }
+        if waited >= timeout {
+            break;
+        }
+        sleep(step);
+        waited += step;
+    }
+    Err(if answered {
+        WaitFail::NotAnExit
+    } else {
+        WaitFail::NoSession
+    })
+}
+
+/// Before routing anything through an exit, map it for the probe address only and wait
+/// until the session to it is live. On failure the probe mapping is removed and nothing
+/// else is touched. Skips the probe when the exit is already live.
+fn wait_live(
+    c: &mut Client,
+    address: &str,
+    token: &str,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let before = c.list_exits().map_err(|e| {
+        format!("{e}; can't check the session to the exit first (--wait 0 maps without checking)")
+    })?;
+    if before
+        .exits
+        .iter()
+        .any(|e| same_exit(&e.address, address) && e.session_live && e.exit_capable)
+    {
+        return Ok(());
+    }
+    let probe = MapExit {
+        address: address.to_string(),
+        full_tunnel: false,
+        ip_ranges: vec![PROBE_RANGE.into()],
+        token: token.to_string(),
+    };
+    c.map_exit(&probe)?;
+    eprintln!(
+        "waiting up to {} s for the session to the exit...",
+        timeout.as_secs()
+    );
+    let r = wait_for_session(
+        address,
+        timeout,
+        Duration::from_secs(1),
+        || c.list_exits().map_err(|e| e.to_string()),
+        std::thread::sleep,
+    );
+    match r {
+        Ok(()) => Ok(()),
+        Err(f) => {
+            if f != WaitFail::Gone {
+                // Best effort: the service's exit guard also drops it later.
+                let _ = c.unmap_exit(address);
+            }
+            Err(f.message(timeout.as_secs()).into())
+        }
+    }
 }
 
 /// Stops the service through the Service Control Manager. Asking the router itself to
@@ -419,6 +577,23 @@ fn routes_line(up: Option<bool>, reason: Option<&str>) -> String {
     }
 }
 
+/// The routes line for status and exits. The router says routes are up as soon as an
+/// exit is mapped, even when there is no session to it; that is the state where nothing
+/// gets out, so say that instead of "up".
+fn routes_summary(l: &ExitList) -> String {
+    let real: Vec<_> = l.exits.iter().filter(|e| !is_probe(e)).collect();
+    if !l.exits.is_empty() && real.is_empty() {
+        return "exit routes: down (waiting for the session to the exit)".to_string();
+    }
+    if l.routes_up == Some(true)
+        && !real.is_empty()
+        && !real.iter().any(|e| e.session_live && e.exit_capable)
+    {
+        return "exit routes: blocked (session to exit: down, so nothing gets through; run rusty-ctl unmap)".to_string();
+    }
+    routes_line(l.routes_up, l.routes_reason.as_deref())
+}
+
 /// The router's session to an exit; says nothing about whether traffic is routed there.
 fn session_state(live: bool, exit_capable: bool) -> &'static str {
     match (live, exit_capable) {
@@ -479,6 +654,150 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    fn exits(v: serde_json::Value) -> ExitList {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn session_wait_returns_once_live() {
+        let mut polls = 0;
+        let r = wait_for_session(
+            "A.sesh",
+            Duration::from_secs(45),
+            Duration::from_secs(1),
+            || {
+                polls += 1;
+                let live = polls >= 3;
+                Ok(exits(json!({"routes_up": false, "exits": [
+                    {"address": "a.sesh", "ranges": [PROBE_RANGE], "session_live": live, "exit_capable": live}
+                ]})))
+            },
+            |_| {},
+        );
+        assert_eq!(r, Ok(()));
+        assert_eq!(polls, 3);
+    }
+
+    #[test]
+    fn session_wait_times_out() {
+        let mut slept = Duration::ZERO;
+        let mut polls = 0;
+        let r = wait_for_session(
+            "a.sesh",
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+            || {
+                polls += 1;
+                Ok(exits(
+                    json!({"exits": [{"address": "a.sesh", "ranges": [PROBE_RANGE]}]}),
+                ))
+            },
+            |d| slept += d,
+        );
+        assert_eq!(r, Err(WaitFail::NoSession));
+        assert_eq!(slept, Duration::from_secs(30));
+        assert_eq!(polls, 31);
+        let m = WaitFail::NoSession.message(30);
+        assert!(
+            m.starts_with("Couldn't reach that exit. Check the address."),
+            "{m}"
+        );
+        assert!(m.contains("not changed"));
+    }
+
+    #[test]
+    fn session_wait_tells_live_but_not_exit_and_gone() {
+        let r = wait_for_session(
+            "a.sesh",
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            || {
+                Ok(exits(
+                    json!({"exits": [{"address": "a.sesh", "session_live": true, "exit_capable": false}]}),
+                ))
+            },
+            |_| {},
+        );
+        assert_eq!(r, Err(WaitFail::NotAnExit));
+        // A stale address shows up here too (the router keeps a pending session), so it
+        // gets the same first line.
+        assert!(WaitFail::NotAnExit
+            .message(2)
+            .starts_with("Couldn't reach that exit. Check the address."));
+        let r = wait_for_session(
+            "a.sesh",
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            || Ok(exits(json!({"exits": []}))),
+            |_| {},
+        );
+        assert_eq!(r, Err(WaitFail::Gone));
+        let r = wait_for_session(
+            "a.sesh",
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+            || Err("connection reset".into()),
+            |_| {},
+        );
+        assert_eq!(r, Err(WaitFail::Rpc("connection reset".into())));
+    }
+
+    #[test]
+    fn never_says_routes_up_without_a_session() {
+        // The stale-address case: router has the full tunnel in, session down.
+        let l = exits(json!({"routes_up": true, "exits": [
+            {"address": "a.sesh", "ranges": ["0.0.0.0/0"], "session_live": false, "exit_capable": false}
+        ]}));
+        let s = routes_summary(&l);
+        assert!(!s.contains("up"), "{s}");
+        assert!(s.contains("blocked"), "{s}");
+        // Live but not an exit is just as stuck.
+        let l = exits(json!({"routes_up": true, "exits": [
+            {"address": "a.sesh", "ranges": ["0.0.0.0/0"], "session_live": true, "exit_capable": false}
+        ]}));
+        assert!(routes_summary(&l).contains("blocked"));
+        let l = exits(json!({"routes_up": true, "exits": [
+            {"address": "a.sesh", "ranges": ["0.0.0.0/0"], "session_live": true, "exit_capable": true}
+        ]}));
+        assert_eq!(routes_summary(&l), "exit routes: up");
+        // Only the probe mapping: we are still waiting, nothing is routed.
+        let l = exits(json!({"routes_up": true, "exits": [
+            {"address": "a.sesh", "ranges": [PROBE_RANGE]}
+        ]}));
+        assert!(routes_summary(&l).starts_with("exit routes: down"));
+        let l = exits(json!({"routes_up": false, "routes_reason": "no exit mapped", "exits": []}));
+        assert_eq!(routes_summary(&l), "exit routes: down (no exit mapped)");
+    }
+
+    #[test]
+    fn map_and_swap_wait_by_default() {
+        let c = Cli::try_parse_from(["rusty-ctl", "map", "a.sesh", "--full"]).unwrap();
+        assert!(matches!(
+            c.cmd,
+            Cmd::Map {
+                wait: DEFAULT_WAIT,
+                ..
+            }
+        ));
+        let c =
+            Cli::try_parse_from(["rusty-ctl", "map", "a.sesh", "--full", "--wait", "0"]).unwrap();
+        assert!(matches!(c.cmd, Cmd::Map { wait: 0, .. }));
+        let c = Cli::try_parse_from(["rusty-ctl", "swap", "a.sesh", "b.sesh", "--full"]).unwrap();
+        assert!(matches!(
+            c.cmd,
+            Cmd::Swap {
+                wait: DEFAULT_WAIT,
+                ..
+            }
+        ));
+        assert!(!takes_default(&MapExit {
+            address: "a.sesh".into(),
+            full_tunnel: false,
+            ip_ranges: vec![PROBE_RANGE.into()],
+            token: String::new(),
+        }));
     }
 
     #[test]
