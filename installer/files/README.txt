@@ -11,8 +11,8 @@ Use it (admin PowerShell)
    sc.exe start RustySessionRouter
    .\rusty-ctl.exe status
    .\rusty-ctl.exe map <exit>.sesh --full
-   .\rusty-ctl.exe exits        (wait for "session to exit: live")
-   .\rusty-ctl.exe unmap <exit>.sesh
+   .\rusty-ctl.exe exits        (shows "session to exit: live")
+   .\rusty-ctl.exe unmap <exit>.sesh   (or just unmap, for every exit)
    .\rusty-ctl.exe stop         (stops the service)
 
 If the exit only lets in known clients, give its operator this PC's address
