@@ -55,8 +55,8 @@ enum Cmd {
     /// Check this computer is ready for a full-tunnel exit (no other VPN holding the
     /// route). Exit code 3 if not. With --json, also what the exit guard last did.
     Preflight,
-    /// Stop using an exit.
-    Unmap { address: String },
+    /// Stop using an exit. With no address, unmaps every mapped exit.
+    Unmap { address: Option<String> },
     /// Move mappings from one exit to another.
     Swap {
         old: String,
@@ -237,8 +237,23 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Cmd::Unmap { address } => {
-            c.unmap_exit(address)?;
-            println!("unmapped {address}");
+            let addrs = match address {
+                Some(a) => vec![a.clone()],
+                None => c
+                    .list_exits()
+                    .map_err(|e| format!("{e}; give the exit address to unmap"))?
+                    .exits
+                    .into_iter()
+                    .map(|e| e.address)
+                    .collect(),
+            };
+            if addrs.is_empty() {
+                println!("no exits mapped");
+            }
+            for a in &addrs {
+                c.unmap_exit(a)?;
+                println!("unmapped {a}");
+            }
         }
         Cmd::Swap {
             old,
@@ -462,6 +477,17 @@ mod tests {
                 assert!(full);
                 assert!(range.is_empty());
             }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmap_address_is_optional() {
+        let c = Cli::try_parse_from(["rusty-ctl", "unmap"]).unwrap();
+        assert!(matches!(c.cmd, Cmd::Unmap { address: None }));
+        let c = Cli::try_parse_from(["rusty-ctl", "unmap", "a.sesh"]).unwrap();
+        match c.cmd {
+            Cmd::Unmap { address } => assert_eq!(address.as_deref(), Some("a.sesh")),
             other => panic!("unexpected {other:?}"),
         }
     }

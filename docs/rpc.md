@@ -10,7 +10,7 @@ to loopback connections only.
 | `llarp.version` | none | `rusty-ctl status`, service readiness check |
 | `llarp.list_exits` | none | `rusty-ctl status`, `rusty-ctl exits` |
 | `llarp.map_exit` | `address`, `full_tunnel`, `ip_ranges`, `token` | `rusty-ctl map` |
-| `llarp.unmap_exit` | `address` | `rusty-ctl unmap` |
+| `llarp.unmap_exit` | `address` | `rusty-ctl unmap` (with no address: each exit from `list_exits`) |
 | `llarp.swap_exits` | `exit_addresses` (old, new), `full_tunnel`, `ip_ranges`, `token` | `rusty-ctl swap` |
 | `llarp.halt` | none | service stop (the service asks the router to exit) |
 

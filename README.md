@@ -36,7 +36,7 @@ sc.exe start RustySessionRouter
 .\rusty-ctl.exe status
 .\rusty-ctl.exe map <exit>.sesh --full      # everything through the exit
 .\rusty-ctl.exe exits                       # wait for "session to exit: live"
-.\rusty-ctl.exe unmap <exit>.sesh
+.\rusty-ctl.exe unmap <exit>.sesh           # or just unmap to drop every exit
 .\rusty-ctl.exe stop                        # stops the service; network back as before
 ```
 
